@@ -6,9 +6,9 @@ No necesitás saber de programación. No se instala nada: se descarga un solo ar
 
 ## Cómo descargarla
 
-1. Entrá a la sección **Releases** de esta página (a la derecha, o en https://github.com/crgiodqz/clasificador-musica/releases/latest).
-2. En **Assets**, hacé clic en `Clasificador-de-musica.exe` para descargarlo.
-3. Guardalo donde quieras (por ejemplo, el Escritorio) y abrilo con doble clic.
+1. Hacé clic acá para descargar: **[Clasificador-de-musica.zip](https://github.com/crgiodqz/clasificador-musica/raw/main/descargas/Clasificador-de-musica.zip)** (2,4 MB).
+2. Abrí el archivo descargado, hacé clic derecho y elegí **Extraer todo**. Va a quedar `Clasificador-de-musica.exe`.
+3. Movelo donde quieras (por ejemplo, el Escritorio) y abrilo con doble clic.
 
 ### Si Windows muestra "Windows protegió su PC"
 
