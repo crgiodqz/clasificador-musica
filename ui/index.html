@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clasificador de música</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="filters">
+    <div class="f-head"><input id="q" type="search" placeholder="Buscar tema, nota o momento" autocomplete="off" spellcheck="false"></div>
+    <div id="f-scroll">
+      <div id="f-quick"></div>
+      <div id="f-cats"></div>
+    </div>
+    <div class="f-foot">
+      <button id="btn-clear" class="btn">Limpiar filtros</button>
+      <button id="btn-cats" class="btn">Gestionar categorías</button>
+      <div class="two">
+        <button id="btn-folder" class="btn">Cambiar carpeta</button>
+        <button id="btn-rescan" class="btn">Reescanear</button>
+      </div>
+    </div>
+  </aside>
+
+  <main id="center">
+    <div id="c-head">
+      <span id="count">0 temas</span>
+      <span id="pending" hidden></span>
+      <span class="grow"></span>
+      <button id="btn-help" class="btn" title="Ver atajos (?)">Atajos</button>
+      <label class="sortl">Orden
+        <select id="sort">
+          <option value="name">Nombre</option>
+          <option value="dur">Duración</option>
+          <option value="bpm">BPM</option>
+          <option value="recent">Recientes</option>
+        </select>
+      </label>
+      <button id="btn-rand" class="btn rnd" title="Reproducir un tema al azar de la lista (R)">Al azar <kbd>R</kbd></button>
+    </div>
+    <div id="list"><div id="list-inner"></div></div>
+  </main>
+
+  <aside id="detail"></aside>
+
+  <footer id="player">
+    <audio id="audio" preload="auto"></audio>
+    <div id="p-top">
+      <button id="b-prev" class="ib" title="Anterior (flecha arriba)"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M3 2h2v12H3zM14 2v12L6 8z" fill="currentColor"/></svg></button>
+      <button id="b-play" class="ib big" title="Play / pausa (espacio)"></button>
+      <button id="b-next" class="ib" title="Siguiente (flecha abajo)"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M11 2h2v12h-2zM2 2v12l8-6z" fill="currentColor"/></svg></button>
+      <span id="p-time">0:00 / 0:00</span>
+      <span id="p-title" class="grow"></span>
+      <span id="p-drag" class="dh" hidden></span>
+      <button id="b-save-range" class="btn gold" hidden>Guardar como momento</button>
+      <button id="b-in" class="btn" title="Marcar inicio (I)">Marcar inicio <kbd>I</kbd></button>
+      <button id="b-out" class="btn" title="Marcar fin (O)">Marcar fin <kbd>O</kbd></button>
+      <button id="b-loop" class="btn" title="Repetir el momento que suena">Loop momento</button>
+      <label class="vol" title="Volumen"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/></svg><input id="vol" type="range" min="0" max="1" step="0.01" value="0.9"></label>
+    </div>
+    <div id="wavebox"><canvas id="wave"></canvas><div id="tip" hidden></div><div id="wave-empty" hidden>Elegí un tema para escucharlo</div></div>
+  </footer>
+</div>
+<div id="modal" hidden></div>
+<div id="help" hidden></div>
+<div id="dropov" hidden><div>Soltá para agregar a tu carpeta de música</div></div>
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
