@@ -86,6 +86,7 @@ function hasTags(t) { return !!t && Object.values(t.tags).some(a => a && a.lengt
 
 function applyState(st) {
   S = st;
+  $('#welcome').hidden = !st.needs_folder;
   lib = normalizeLib(st.library);
   S.library = lib;
   byId.clear();
@@ -247,6 +248,7 @@ $('#btn-clear').onclick = () => {
   $('#q').value = '';
   computeView(); renderFilters(); layoutList(); renderList(true);
 };
+$('#w-pick').onclick = () => $('#btn-folder').click();
 $('#btn-folder').onclick = async () => {
   try { const st = await invoke('pick_folder'); if (st) applyState(st); } catch (e) { toast('Error: ' + e); }
 };
@@ -1029,6 +1031,7 @@ const normPath = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerC
 async function onDrop(p) {
   $('#dropov').hidden = true;
   const paths = (p && p.paths) || []; if (!paths.length) return;
+  if (!S.folder) { toast('Primero elegí la carpeta de tu música'); return; }
   const root = normPath(S.folder || '') + '/';
   if (S.folder && paths.every(x => (normPath(x) + '/').startsWith(root))) { toast('Ese tema ya está en tu carpeta'); return; }
   try {

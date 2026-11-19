@@ -15,7 +15,6 @@ use audio::{analyze, cut_mp3, Analysis, BUCKETS};
 
 const AUDIO_EXT: &[&str] = &["mp3", "m4a", "aac", "wav", "flac", "ogg"];
 const IMG_EXT: &[&str] = &["jpg", "jpeg", "png", "webp"];
-const DEFAULT_FOLDER: &str = r"C:\Users\scott\OneDrive\Documentos\1.produccion de videos\Musica";
 
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -89,24 +88,24 @@ fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("config.json"))
 }
 
-fn load_folder(app: &tauri::AppHandle) -> PathBuf {
-    if let Some(p) = config_path(app) {
-        if let Ok(s) = fs::read_to_string(&p) {
-            if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                if let Some(f) = v.get("folder").and_then(|f| f.as_str()) {
-                    let pb = PathBuf::from(f);
-                    if pb.is_dir() {
-                        return pb;
-                    }
-                }
-            }
-        }
-    }
-    let def = PathBuf::from(DEFAULT_FOLDER);
-    if def.is_dir() {
-        return def;
-    }
-    app.path().audio_dir().unwrap_or_else(|_| PathBuf::from("."))
+fn load_folder(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let p = config_path(app)?;
+    let s = fs::read_to_string(&p).ok()?;
+    let v = serde_json::from_str::<Value>(&s).ok()?;
+    let pb = PathBuf::from(v.get("folder")?.as_str()?);
+    if pb.is_dir() { Some(pb) } else { None }
+}
+
+/// Estado vacío para la primera apertura: todavía no se eligió carpeta.
+fn empty_state() -> Value {
+    json!({
+        "folder": "",
+        "files": [],
+        "photos": [],
+        "library": default_library(),
+        "pending": 0,
+        "needs_folder": true
+    })
 }
 
 fn save_folder(app: &tauri::AppHandle, folder: &Path) {
@@ -501,7 +500,10 @@ async fn get_state(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Va
         let inner = st.inner.lock().unwrap();
         if inner.library.is_null() { None } else { Some(inner.folder.clone()) }
     };
-    let folder = folder.unwrap_or_else(|| load_folder(&app));
+    let folder = match folder.or_else(|| load_folder(&app)) {
+        Some(f) => f,
+        None => return Ok(empty_state()),
+    };
     Ok(load_and_scan(&app, &st, folder))
 }
 
@@ -509,6 +511,9 @@ async fn get_state(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Va
 async fn rescan(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Value, String> {
     let st = st.inner().clone();
     let folder = st.inner.lock().unwrap().folder.clone();
+    if folder.as_os_str().is_empty() {
+        return Ok(empty_state());
+    }
     Ok(load_and_scan(&app, &st, folder))
 }
 
@@ -517,7 +522,13 @@ async fn pick_folder(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<
     use tauri_plugin_dialog::DialogExt;
     let st = st.inner().clone();
     let current = st.inner.lock().unwrap().folder.clone();
-    let picked = app.dialog().file().set_directory(&current).blocking_pick_folder();
+    let mut dlg = app.dialog().file();
+    if current.is_dir() {
+        dlg = dlg.set_directory(&current);
+    } else if let Ok(a) = app.path().audio_dir() {
+        dlg = dlg.set_directory(a);
+    }
+    let picked = dlg.blocking_pick_folder();
     let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
     save_folder(&app, &p);
     Ok(Some(load_and_scan(&app, &st, p)))
@@ -639,6 +650,9 @@ fn save_analysis(st: TState<'_, AppState>, id: String, analysis: Analysis) -> Re
 async fn import_files(app: tauri::AppHandle, st: TState<'_, AppState>, paths: Vec<String>) -> Result<Value, String> {
     let st = st.inner().clone();
     let folder = st.inner.lock().unwrap().folder.clone();
+    if folder.as_os_str().is_empty() {
+        return Err("Primero elegí la carpeta de tu música".into());
+    }
     let (mut added, mut skipped) = (0, 0);
     let mut queue: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     while let Some(p) = queue.pop() {
