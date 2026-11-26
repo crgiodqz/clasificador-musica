@@ -60,3 +60,38 @@ Un track sin entrada en `tracks` = sin etiquetas.
   Para temas que el motor no pudo decodificar: llegan con analysis.duration === 0 (peaks todo en 0).
   La interfaz los decodifica ella misma y manda el resultado para que quede cacheado.
 - `import_files({ paths })` → { state, added, skipped }  (copia audios soltados en la ventana a la carpeta)
+
+
+# v3 (motor Rust 0.4.0)
+
+## Datos en disco
+- `config.json` (directorio de config de la app): `{ "folder": "<principal>", "roots": [ { "path", "key", "excluded": [rel] } ], "ui": {...} }`.
+  `roots[0]` es la carpeta principal (key `""`). El formato viejo `{ "folder" }` se migra solo. `ui` es un objeto opaco que guarda la interfaz.
+  Las claves de las carpetas extra son 6 hex derivados de la ruta (`key`), y los ids de sus temas son `key + "::" + rel`.
+  En la principal el id es la ruta relativa (`rel`, con `/`).
+- Todo lo demás vive en `<principal>/.clasificador/`: `biblioteca.json`, `ondas.json`, `respaldos/`, `fragmentos/`, `portadas/`.
+- `ondas.json`: `{ id: { size, mtime, analysis } }`. Las entradas cuyo `analysis` no tiene `lead` se descartan al leer (se re-analizan en segundo plano).
+- `portadas/portadas.json`: `{ id: "app-<hash>.<ext>" }`, portadas puestas desde la app (modo "app"), con la imagen en `portadas/`.
+- `portadas/emb/<hash>.<ext>`: portadas embebidas extraídas una sola vez (hash FNV-1a de id+size+mtime). `<hash>.none` = el archivo no tiene portada.
+
+## State (get_state, rescan, pick_folder, add_root, remove_root, set_excluded)
+`{ folder, needs_folder, roots: [{ path, key, excluded, exists }], ui, files, photos, library, pending }`.
+`files[]`: `{ id, path, name, ext, size, mtime, root, rel, cover, analysis }` (`cover` = ruta absoluta de la imagen o null).
+`analysis`: `{ duration, bpm, peaks, rms, lead }` (`lead` = segundos de silencio inicial; 0 si es menor a 0,3 s).
+Prioridad de portada: la de la app > la embebida > null (la interfaz cae a `photos` por nombre de artista).
+`needs_folder` es true si no hay carpeta principal válida (la interfaz muestra la bienvenida).
+Subcarpetas excluidas (`excluded`, rutas relativas con `/`) no se recorren. La migración por renombre (mismo tamaño) solo une ids de la misma raíz y solo si el archivo viejo ya no existe.
+
+## Comandos nuevos
+- `add_root()` → State | null (abre el diálogo; null si se cancela). La principal debe existir.
+- `remove_root({ key })` → State. Con key vacío: error "La carpeta principal no se quita: cambiala con \"Cambiar carpeta principal\"."
+- `set_excluded({ key, excluded })` → State
+- `list_subfolders({ key })` → `[{ rel, depth, audio }]` en pre-orden (depth 0 = hija directa; `audio` = audios directos). Solo subcarpetas con audios adentro o debajo; ignora las exclusiones.
+- `save_ui_settings({ ui })` → null
+- `set_cover({ id, mode: "file"|"app", path }` o `{ id, mode, data, ext })` → `{ file, mode, library, warning? }`.
+  `data` base64 sin prefijo; jpg/png/webp, hasta 15 MB. Modo "file": escribe la portada frontal dentro del archivo (mp3, m4a, flac, ogg) con lofty;
+  si falla, la guarda en modo app y devuelve `warning`. Tras escribir actualiza size/mtime en el FileInfo y en ondas.json.
+- `rename_track({ id, name })` → `{ id, state }`. Renombra el archivo (misma carpeta y extensión) y mueve biblioteca, ondas y portada de la app a la id nueva.
+  Errores en español (caracteres no permitidos, nombre repetido, archivo en uso).
+- Biblioteca nueva por defecto: sin "Tendencia de copy"; "Usado en" sin valores.
+- Ventana: `zoomHotkeysEnabled: false` y, en Windows, el pellizco de la página (WebView2 `IsPinchZoomEnabled`) desactivado.

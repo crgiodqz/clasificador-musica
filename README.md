@@ -6,7 +6,7 @@ No necesitás saber de programación. No se instala nada: se descarga un solo ar
 
 ## Cómo descargarla
 
-1. Hacé clic acá para descargar: **[Clasificador-de-musica.zip](https://github.com/crgiodqz/clasificador-musica/raw/main/descargas/Clasificador-de-musica.zip)** (2,4 MB).
+1. Hacé clic acá para descargar: **[Clasificador-de-musica.zip](https://github.com/crgiodqz/clasificador-musica/releases/latest/download/Clasificador-de-musica.zip)**.
 2. Abrí el archivo descargado, hacé clic derecho y elegí **Extraer todo**. Va a quedar `Clasificador-de-musica.exe`.
 3. Movelo donde quieras (por ejemplo, el Escritorio) y abrilo con doble clic.
 
@@ -36,11 +36,16 @@ Apretá **?** dentro de la app para ver todos los atajos de teclado.
 - **Arrastrar al editor:** el tema entero, o solo un momento recortado, se arrastra desde la app hasta la línea de tiempo de tu editor.
 - **Filtrar:** por cualquier combinación de etiquetas. Si un filtro coincide con un momento, la lista te muestra ese fragmento.
 - **Agregar temas nuevos:** soltá audios sobre la ventana y se copian a tu carpeta. Lo que descargues a la carpeta aparece solo al volver a la app.
+- **Varias carpetas:** en Configuración podés agregar carpetas extra y destildar las subcarpetas que no querés ver.
+- **Portadas:** se muestra la que trae el archivo. Podés cambiarla (botón, pegar o soltar una imagen) y elegir si se guarda dentro del archivo o solo en la app.
+- **Renombrar temas:** doble clic en el nombre. Se renombra el archivo y no perdés etiquetas ni momentos.
+- **Silencio inicial:** la app detecta cuando un tema arranca con silencio y puede saltearlo al reproducir.
+- **Zoom en la onda:** Ctrl + rueda o pellizco del touchpad.
 - **Descubrir:** botón **Al azar** (tecla R) para sacar un tema al azar.
 
 ## Tus archivos están a salvo
 
-- La app **no modifica, no mueve ni borra** tu música.
+- La app **no mueve ni borra** tu música. Solo toca un archivo si vos le pedís cambiarle el nombre o guardarle una portada adentro.
 - Sus datos (etiquetas, ondas, momentos) se guardan en una carpeta oculta llamada `.clasificador` dentro de tu carpeta de música. Si copiás esa carpeta, te llevás todo.
 - Una vez por día guarda una copia de las etiquetas (se conservan las de los últimos 14 días).
 - No usa internet ni envía nada a ningún lado.
@@ -56,7 +61,7 @@ Apretá **?** dentro de la app para ver todos los atajos de teclado.
 
 ## Para programadores
 
-Hecha con [Tauri](https://tauri.app) v2: backend en Rust (symphonia para decodificar y analizar el audio, rayon para el análisis en segundo plano) e interfaz en HTML, CSS y JavaScript sin librerías. Tipografía Host Grotesk incluida. El contrato entre la interfaz y el backend está en `SPEC.md`.
+Hecha con [Tauri](https://tauri.app) v2: backend en Rust (symphonia para decodificar y analizar el audio, lofty para las portadas, rayon para el análisis en segundo plano) e interfaz en HTML, CSS y JavaScript sin librerías. Tipografía Host Grotesk incluida. El contrato entre la interfaz y el backend está en `SPEC.md`.
 
 Para compilar:
 
