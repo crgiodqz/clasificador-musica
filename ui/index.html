@@ -30,6 +30,7 @@
       <span id="count">0 temas</span>
       <span id="pending" hidden></span>
       <span class="grow"></span>
+      <button id="btn-cueopen" class="btn" title="Modo guion (G)">Modo guion <kbd>G</kbd></button>
       <button id="btn-quick" class="btn" title="Etiquetado rápido (E)">Etiquetado rápido <kbd>E</kbd></button>
       <button id="btn-help" class="btn" title="Ver atajos (?)">Atajos</button>
       <label class="sortl">Orden
@@ -40,15 +41,27 @@
           <option value="recent">Recientes</option>
         </select>
       </label>
+      <button id="btn-view" class="btn" title="Cambiar entre lista y cuadrícula">Cuadrícula</button>
+      <span class="pnl" title="Mostrar u ocultar paneles"></span>
       <button id="btn-rand" class="btn rnd" title="Reproducir un tema al azar de la lista (R)">Al azar <kbd>R</kbd></button>
     </div>
     <div id="qbar" hidden></div>
     <div id="list"><div id="list-inner"></div></div>
   </main>
 
+  <aside id="cues" hidden></aside>
+
   <aside id="detail"></aside>
 
+  <footer id="pmini" hidden>
+    <button id="b-play2" class="ib big" title="Play / pausa (espacio)"></button>
+    <span id="p-time2">0:00 / 0:00</span>
+    <span id="p-title2" class="grow"></span>
+    <button id="b-showplayer" class="btn" title="Mostrar la onda (Ctrl+Alt+4)">Mostrar onda</button>
+    <span class="pnl"></span>
+  </footer>
   <footer id="player">
+    <div id="p-resize" title="Arrastrá para cambiar la altura de la onda"></div>
     <audio id="audio" preload="auto"></audio>
     <div id="p-top">
       <button id="b-prev" class="ib" title="Anterior (flecha arriba)"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M3 2h2v12H3zM14 2v12L6 8z" fill="currentColor"/></svg></button>
@@ -60,13 +73,19 @@
       <button id="b-save-range" class="btn gold" hidden>Guardar como momento</button>
       <button id="b-in" class="btn" title="Marcar inicio (I)">Marcar inicio <kbd>I</kbd></button>
       <button id="b-out" class="btn" title="Marcar fin y crear el momento (O)">Marcar fin <kbd>O</kbd></button>
+      <button id="b-cue-range" class="btn" title="Agregar el rango marcado como cue del guion" hidden>Agregar cue</button>
       <button id="b-loop" class="btn" title="Repetir el momento que suena">Loop momento</button>
+      <span class="zoomg" title="Zoom de la onda: pellizco, Ctrl + rueda, o estos botones"><button id="z-out" class="ib" title="Alejar (-)">−</button><button id="b-fit" class="btn" title="Volver a ver todo el tema (1×)">Ajustar <span id="zl">1×</span></button><button id="z-in" class="ib" title="Acercar (+)">+</button></span>
+      <span class="hsz" title="Altura de la onda"><button class="ib txt" data-wh="150">S</button><button class="ib txt" data-wh="182">M</button><button class="ib txt" data-wh="300">L</button></span>
       <label class="vol" title="Volumen (la marca del medio es el 100%)"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/></svg><span class="vw"><i class="vmark"></i><input id="vol" type="range" min="0" max="1" step="0.005" value="0.4"></span><span id="vol-n">100%</span></label>
+      <span class="pnl" title="Mostrar u ocultar paneles"></span>
     </div>
     <div id="wavebox"><canvas id="wave"></canvas><div id="tip" hidden></div><div id="wave-empty" hidden>Elegí un tema para escucharlo</div></div>
+    <div id="wscroll"><i></i></div>
   </footer>
 </div>
 <div id="modal" hidden></div>
+<div id="crop" hidden></div>
 <div id="settings" hidden></div>
 <div id="ask" hidden></div>
 <div id="help" hidden></div>
