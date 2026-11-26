@@ -10,6 +10,9 @@ pub struct Analysis {
     pub bpm: Option<u32>,
     pub peaks: Vec<u8>,
     pub rms: Vec<u8>,
+    /// Segundos de silencio inicial (0 si es menor a 0.3 s).
+    #[serde(default)]
+    pub lead: f64,
 }
 
 // ---------- audio analysis ----------
@@ -43,6 +46,9 @@ pub fn analyze(path: &Path) -> Option<Analysis> {
     let (mut cur_max, mut cur_sq, mut cur_n) = (0f32, 0f32, 0usize);
     let mut total: u64 = 0;
     let mut buf: Option<SampleBuffer<f32>> = None;
+    // Pico por ventanas de 10 ms (para medir el silencio inicial).
+    let mut win_peaks: Vec<f32> = Vec::with_capacity(60000);
+    let (mut win_max, mut win_n, mut win_len) = (0f32, 0usize, 0usize);
 
     loop {
         let packet = match format.next_packet() {
@@ -59,6 +65,9 @@ pub fn analyze(path: &Path) -> Option<Analysis> {
         };
         let spec = *decoded.spec();
         rate = spec.rate as f64;
+        if win_len == 0 {
+            win_len = ((rate * 0.01).round() as usize).max(1);
+        }
         let ch = spec.channels.count().max(1);
         let need = decoded.capacity() as u64;
         if buf.as_ref().map(|b| (b.capacity() as u64) < need * ch as u64).unwrap_or(true) {
@@ -75,6 +84,15 @@ pub fn analyze(path: &Path) -> Option<Analysis> {
             cur_sq += s * s;
             cur_n += 1;
             total += 1;
+            if a > win_max {
+                win_max = a;
+            }
+            win_n += 1;
+            if win_n == win_len {
+                win_peaks.push(win_max);
+                win_max = 0.0;
+                win_n = 0;
+            }
             if cur_n == BLOCK {
                 block_max.push(cur_max);
                 block_sq.push(cur_sq / BLOCK as f32);
@@ -83,6 +101,9 @@ pub fn analyze(path: &Path) -> Option<Analysis> {
                 cur_n = 0;
             }
         }
+    }
+    if win_n > 0 {
+        win_peaks.push(win_max);
     }
     if cur_n > 0 {
         block_max.push(cur_max);
@@ -116,7 +137,16 @@ pub fn analyze(path: &Path) -> Option<Analysis> {
     let rms_u8 = rms.iter().map(|v| ((v / rmax).powf(0.6) * 255.0).round().clamp(0.0, 255.0) as u8).collect();
 
     let bpm = estimate_bpm(&block_sq, rate / BLOCK as f64);
-    Some(Analysis { duration, bpm, peaks: peaks_u8, rms: rms_u8 })
+    let gpeak = win_peaks.iter().cloned().fold(0f32, f32::max);
+    let thr = (0.02 * gpeak).max(0.003);
+    let lead = match win_peaks.iter().position(|v| *v > thr) {
+        Some(i) => {
+            let l = (i as f64 * 0.01 - 0.05).max(0.0);
+            if l < 0.3 { 0.0 } else { l }
+        }
+        None => 0.0,
+    };
+    Some(Analysis { duration, bpm, peaks: peaks_u8, rms: rms_u8, lead })
 }
 
 /// Onset-envelope autocorrelation tempo estimate (rough; labelled "~" in the UI).

@@ -1,0 +1,56 @@
+name: Windows
+
+on:
+  push:
+    branches: [v3, main]
+    paths:
+      - "src-tauri/**"
+      - "ui/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Compilar
+        working-directory: src-tauri
+        run: cargo build --release --locked --features tauri/custom-protocol
+
+      - name: Armar el zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item src-tauri/target/release/clasificador.exe dist/Clasificador-de-musica.exe
+          Compress-Archive -Path dist/Clasificador-de-musica.exe -DestinationPath dist/Clasificador-de-musica.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Clasificador-de-musica
+          path: dist/Clasificador-de-musica.zip
+
+      - name: Publicar release v0.4.0
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.4.0 >/dev/null 2>&1; then
+            gh release upload v0.4.0 dist/Clasificador-de-musica.zip --clobber
+          else
+            gh release create v0.4.0 dist/Clasificador-de-musica.zip \
+              --target "${{ github.sha }}" \
+              --title "Clasificador de música 0.4" \
+              --notes "Versión 0.4: carpetas extra con subcarpetas excluibles, portadas (las del archivo y las que ponés en la app), renombrar temas, silencio inicial y mejoras en el zoom de la onda. Descargá el zip, descomprimilo y abrí Clasificador-de-musica.exe." \
+              --latest
+          fi

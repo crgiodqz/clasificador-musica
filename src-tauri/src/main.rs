@@ -11,11 +11,12 @@ use std::time::UNIX_EPOCH;
 use tauri::{Emitter, Manager, State as TState};
 
 mod audio;
+mod covers;
 use audio::{analyze, cut_mp3, Analysis, BUCKETS};
 
 const AUDIO_EXT: &[&str] = &["mp3", "m4a", "aac", "wav", "flac", "ogg"];
 const IMG_EXT: &[&str] = &["jpg", "jpeg", "png", "webp"];
-
+const MAX_COVER_BYTES: usize = 15 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct CacheEntry {
@@ -32,6 +33,9 @@ struct FileInfo {
     ext: String,
     size: u64,
     mtime: u64,
+    root: String,
+    rel: String,
+    cover: Option<String>,
     analysis: Option<Analysis>,
 }
 
@@ -41,11 +45,29 @@ struct Photo {
     path: String,
 }
 
+/// Una carpeta de musica. La primera (key "") es la principal y guarda `.clasificador/`.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Root {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    excluded: Vec<String>,
+}
+
 #[derive(Default)]
 struct Inner {
+    loaded: bool,
+    roots: Vec<Root>,
+    ui: Value,
+    /// carpeta principal (roots[0]) o vacia si no hay
     folder: PathBuf,
+    /// carpeta principal para la que estan cargados biblioteca/cache/portadas
+    data_root: PathBuf,
     library: Value,
     cache: HashMap<String, CacheEntry>,
+    app_covers: HashMap<String, String>,
     files: Vec<FileInfo>,
 }
 
@@ -88,33 +110,127 @@ fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("config.json"))
 }
 
-fn load_folder(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let p = config_path(app)?;
-    let s = fs::read_to_string(&p).ok()?;
-    let v = serde_json::from_str::<Value>(&s).ok()?;
-    let pb = PathBuf::from(v.get("folder")?.as_str()?);
-    if pb.is_dir() { Some(pb) } else { None }
+fn norm_rel(s: &str) -> String {
+    s.replace('\\', "/").trim_matches('/').to_string()
 }
 
-/// Estado vacío para la primera apertura: todavía no se eligió carpeta.
-fn empty_state() -> Value {
-    json!({
-        "folder": "",
-        "files": [],
-        "photos": [],
-        "library": default_library(),
-        "pending": 0,
-        "needs_folder": true
-    })
+/// Lee config.json (formato v3 `roots`+`ui`, o el viejo `{folder}`).
+fn load_config(app: &tauri::AppHandle) -> (Vec<Root>, Value) {
+    let mut roots: Vec<Root> = Vec::new();
+    let mut ui = json!({});
+    let Some(p) = config_path(app) else { return (roots, ui) };
+    let Ok(s) = fs::read_to_string(&p) else { return (roots, ui) };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else { return (roots, ui) };
+    if let Some(arr) = v.get("roots").and_then(|r| r.as_array()) {
+        for r in arr {
+            if let Ok(mut root) = serde_json::from_value::<Root>(r.clone()) {
+                if root.path.is_empty() {
+                    continue;
+                }
+                root.excluded = root.excluded.iter().map(|e| norm_rel(e)).filter(|e| !e.is_empty()).collect();
+                roots.push(root);
+            }
+        }
+        // la principal siempre es la primera y con key vacia
+        if let Some(first) = roots.first_mut() {
+            first.key = String::new();
+        }
+        let mut seen = HashSet::new();
+        let mut i = 0;
+        roots.retain(|r| {
+            let first = i == 0;
+            i += 1;
+            first || (!r.key.is_empty() && seen.insert(r.key.clone()))
+        });
+    } else if let Some(f) = v.get("folder").and_then(|f| f.as_str()) {
+        if !f.is_empty() {
+            roots.push(Root { path: f.to_string(), key: String::new(), excluded: vec![] });
+        }
+    }
+    if let Some(u) = v.get("ui") {
+        if u.is_object() {
+            ui = u.clone();
+        }
+    }
+    (roots, ui)
 }
 
-fn save_folder(app: &tauri::AppHandle, folder: &Path) {
+fn save_config(app: &tauri::AppHandle, inner: &Inner) {
     if let Some(p) = config_path(app) {
         if let Some(d) = p.parent() {
             let _ = fs::create_dir_all(d);
         }
-        let _ = fs::write(p, json!({ "folder": folder.to_string_lossy() }).to_string());
+        let main = inner.roots.first().map(|r| r.path.clone()).unwrap_or_default();
+        let v = json!({ "folder": main, "roots": inner.roots, "ui": inner.ui });
+        if let Ok(s) = serde_json::to_vec_pretty(&v) {
+            let _ = write_atomic(&p, &s);
+        }
     }
+}
+
+fn root_key_of(id: &str) -> &str {
+    match id.find("::") {
+        Some(i) => &id[..i],
+        None => "",
+    }
+}
+
+fn make_id(key: &str, rel: &str) -> String {
+    if key.is_empty() { rel.to_string() } else { format!("{}::{}", key, rel) }
+}
+
+fn is_excluded(root: &Root, rel_dir: &str) -> bool {
+    root.excluded.iter().any(|x| rel_dir == x || rel_dir.starts_with(&format!("{}/", x)))
+}
+
+/// Ruta absoluta de un id (para saber si el archivo sigue existiendo).
+fn path_of_id(roots: &[Root], id: &str) -> Option<PathBuf> {
+    let key = root_key_of(id);
+    let rel = if key.is_empty() { id } else { &id[key.len() + 2..] };
+    roots.iter().find(|r| r.key == key).map(|r| Path::new(&r.path).join(rel))
+}
+
+fn main_ok(inner: &Inner) -> bool {
+    !inner.folder.as_os_str().is_empty() && inner.folder.is_dir()
+}
+
+fn sync_main(inner: &mut Inner) {
+    inner.folder = inner.roots.first().map(|r| PathBuf::from(&r.path)).unwrap_or_default();
+}
+
+fn new_key(roots: &[Root], path: &str) -> String {
+    let base = covers::fnv1a(&[path.to_lowercase().as_bytes()]);
+    let mut n = base;
+    loop {
+        let k = format!("{:06x}", n & 0xFFFFFF);
+        if !roots.iter().any(|r| r.key == k) {
+            return k;
+        }
+        n = n.wrapping_add(1);
+    }
+}
+
+fn empty_state(inner: &Inner) -> Value {
+    json!({
+        "folder": inner.folder.to_string_lossy(),
+        "files": [],
+        "photos": [],
+        "library": default_library(),
+        "pending": 0,
+        "needs_folder": true,
+        "roots": roots_json(inner),
+        "ui": inner.ui
+    })
+}
+
+fn roots_json(inner: &Inner) -> Value {
+    Value::Array(
+        inner
+            .roots
+            .iter()
+            .map(|r| json!({ "path": r.path, "key": r.key, "excluded": r.excluded, "exists": Path::new(&r.path).is_dir() }))
+            .collect(),
+    )
 }
 
 fn load_library(folder: &Path) -> Value {
@@ -176,12 +292,35 @@ fn save_library_file(folder: &Path, lib: &Value) {
     }
 }
 
+/// Lee ondas.json. Las entradas sin `lead` (analisis viejos) se descartan: se re-analizan en segundo plano.
 fn load_cache(folder: &Path) -> HashMap<String, CacheEntry> {
     let p = data_dir(folder).join("ondas.json");
-    fs::read_to_string(p)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let mut out = HashMap::new();
+    let Some(v) = fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else { return out };
+    let Some(obj) = v.as_object() else { return out };
+    for (k, e) in obj {
+        let has_lead = e.get("analysis").and_then(|a| a.get("lead")).map(|l| l.is_number()).unwrap_or(false);
+        if !has_lead {
+            continue;
+        }
+        if let Ok(ce) = serde_json::from_value::<CacheEntry>(e.clone()) {
+            out.insert(k.clone(), ce);
+        }
+    }
+    out
+}
+
+fn load_app_covers(folder: &Path) -> HashMap<String, String> {
+    let p = data_dir(folder).join("portadas").join("portadas.json");
+    fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_app_covers(folder: &Path, m: &HashMap<String, String>) {
+    let dir = data_dir(folder).join("portadas");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(s) = serde_json::to_vec_pretty(m) {
+        let _ = write_atomic(&dir.join("portadas.json"), &s);
+    }
 }
 
 fn save_cache_file(folder: &Path, cache: &HashMap<String, CacheEntry>) {
@@ -205,9 +344,8 @@ fn default_library() -> Value {
             cat("artista", "Artista", "#c9a24a", false, &[]),
             cat("tipo", "Tipo", "#6fa8dc", true, &["Académica", "OST anime", "OST videojuego", "OST película", "OST serie", "Tango", "Beat"]),
             cat("emocion", "Emoción", "#e06666", true, &["Épico", "Tenso", "Oscuro", "Melancólico", "Nostálgico", "Triunfal", "Tierno", "Misterioso", "Agresivo", "Solemne"]),
-            cat("copy", "Tendencia de copy", "#93c47d", true, &[]),
             cat("copyright", "Reclamos", "#b4a7d6", true, &["Sin reclamos YouTube", "Sin reclamos TikTok", "Reclamo YouTube", "Reclamo TikTok"]),
-            cat("usado", "Usado en", "#f6b26b", true, &["Dante Donadel", "MAGA", "FyL", "IPL", "Canal propio"])
+            cat("usado", "Usado en", "#f6b26b", true, &[])
         ],
         "tracks": {}
     })
@@ -287,7 +425,7 @@ fn mtime_of(m: &fs::Metadata) -> u64 {
     m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn walk(dir: &Path, root: &Path, files: &mut Vec<FileInfo>, photos: &mut Vec<Photo>, depth: u32) {
+fn walk(dir: &Path, rel_dir: &str, root: &Root, files: &mut Vec<FileInfo>, photos: &mut Vec<Photo>, depth: u32) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
@@ -296,23 +434,26 @@ fn walk(dir: &Path, root: &Path, files: &mut Vec<FileInfo>, photos: &mut Vec<Pho
             continue;
         }
         let Ok(meta) = e.metadata() else { continue };
+        let rel = if rel_dir.is_empty() { fname.clone() } else { format!("{}/{}", rel_dir, fname) };
         if meta.is_dir() {
-            if depth < 6 {
-                walk(&p, root, files, photos, depth + 1);
+            if depth < 6 && !is_excluded(root, &rel) {
+                walk(&p, &rel, root, files, photos, depth + 1);
             }
             continue;
         }
         let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
         let stem = p.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
         if AUDIO_EXT.contains(&ext.as_str()) {
-            let id = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
             files.push(FileInfo {
-                id,
+                id: make_id(&root.key, &rel),
                 path: p.to_string_lossy().to_string(),
                 name: stem,
                 ext,
                 size: meta.len(),
                 mtime: mtime_of(&meta),
+                root: root.key.clone(),
+                rel,
+                cover: None,
                 analysis: None,
             });
         } else if IMG_EXT.contains(&ext.as_str()) {
@@ -322,29 +463,101 @@ fn walk(dir: &Path, root: &Path, files: &mut Vec<FileInfo>, photos: &mut Vec<Pho
     }
 }
 
-/// Rescans the folder, migrates tags of renamed files (same size), seeds suggestions.
+fn emb_hash(f: &FileInfo) -> String {
+    format!("{:016x}", covers::fnv1a(&[f.id.as_bytes(), f.size.to_string().as_bytes(), f.mtime.to_string().as_bytes()]))
+}
+
+/// Asigna `cover` a cada archivo: portada de la app > embebida (extraida una sola vez) > null.
+fn resolve_covers(inner: &mut Inner) {
+    let data = data_dir(&inner.folder);
+    let emb = data.join("portadas").join("emb");
+    // indice de lo ya extraido: hash -> extension ("none" = sin portada)
+    let mut idx: HashMap<String, String> = HashMap::new();
+    if let Ok(rd) = fs::read_dir(&emb) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if let (Some(stem), Some(ext)) = (p.file_stem(), p.extension()) {
+                idx.insert(stem.to_string_lossy().to_string(), ext.to_string_lossy().to_string());
+            }
+        }
+    }
+    let todo: Vec<(String, String)> = inner
+        .files
+        .iter()
+        .map(|f| (emb_hash(f), f.path.clone()))
+        .filter(|(h, _)| !idx.contains_key(h))
+        .collect();
+    if !todo.is_empty() {
+        let _ = fs::create_dir_all(&emb);
+        use rayon::prelude::*;
+        let found: Vec<(String, String)> = todo
+            .par_iter()
+            .map(|(h, path)| {
+                let ext = match std::panic::catch_unwind(|| covers::extract_embedded(Path::new(path))) {
+                    Ok(Some((bytes, ext))) => {
+                        if fs::write(emb.join(format!("{}.{}", h, ext)), bytes).is_ok() { ext.to_string() } else { "none".to_string() }
+                    }
+                    _ => "none".to_string(),
+                };
+                if ext == "none" {
+                    let _ = fs::write(emb.join(format!("{}.none", h)), b"");
+                }
+                (h.clone(), ext)
+            })
+            .collect();
+        for (h, e) in found {
+            idx.insert(h, e);
+        }
+    }
+    let portadas = data.join("portadas");
+    for f in inner.files.iter_mut() {
+        f.cover = None;
+        if let Some(name) = inner.app_covers.get(&f.id) {
+            let p = portadas.join(name);
+            if p.is_file() {
+                f.cover = Some(p.to_string_lossy().to_string());
+                continue;
+            }
+        }
+        let h = emb_hash(f);
+        if let Some(ext) = idx.get(&h) {
+            if ext != "none" {
+                f.cover = Some(emb.join(format!("{}.{}", h, ext)).to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+/// Rescans every root, migrates tags of renamed files (same size, same root), seeds suggestions.
 fn scan(inner: &mut Inner) -> Vec<Photo> {
     let mut files = Vec::new();
     let mut photos = Vec::new();
-    let root = inner.folder.clone();
-    walk(&root, &root, &mut files, &mut photos, 0);
+    let main = inner.folder.clone();
+    for r in inner.roots.iter() {
+        let rp = Path::new(&r.path);
+        if rp.is_dir() {
+            walk(rp, "", r, &mut files, &mut photos, 0);
+        }
+    }
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     let ids: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut lib_changed = false;
     let mut cache_changed = false;
 
-    // Migrate renamed files: an orphaned library/cache entry whose cached size matches a new file.
+    // Migrate renamed files: an orphaned cache entry (its file is gone) whose size matches ONE new file of the same root.
     let orphan_cache: Vec<(String, u64)> = inner
         .cache
         .iter()
         .filter(|(k, _)| !ids.contains(*k))
+        .filter(|(k, _)| path_of_id(&inner.roots, k).map(|p| !p.exists()).unwrap_or(false))
         .map(|(k, v)| (k.clone(), v.size))
         .collect();
     for (old, size) in orphan_cache {
+        let old_root = root_key_of(&old).to_string();
         let candidates: Vec<&FileInfo> = files
             .iter()
-            .filter(|f| f.size == size && !inner.cache.contains_key(&f.id))
+            .filter(|f| f.root == old_root && f.size == size && !inner.cache.contains_key(&f.id))
             .collect();
         if candidates.len() == 1 {
             let new_id = candidates[0].id.clone();
@@ -355,9 +568,13 @@ fn scan(inner: &mut Inner) -> Vec<Photo> {
             }
             if let Some(tracks) = inner.library.get_mut("tracks").and_then(|t| t.as_object_mut()) {
                 if let Some(t) = tracks.remove(&old) {
-                    tracks.entry(new_id).or_insert(t);
+                    tracks.entry(new_id.clone()).or_insert(t);
                     lib_changed = true;
                 }
+            }
+            if let Some(c) = inner.app_covers.remove(&old) {
+                inner.app_covers.insert(new_id, c);
+                save_app_covers(&main, &inner.app_covers);
             }
         }
     }
@@ -402,23 +619,28 @@ fn scan(inner: &mut Inner) -> Vec<Photo> {
         }
     }
     inner.files = files;
+    resolve_covers(inner);
     if lib_changed {
-        save_library_file(&root, &inner.library);
+        save_library_file(&main, &inner.library);
     }
     if cache_changed {
-        save_cache_file(&root, &inner.cache);
+        save_cache_file(&main, &inner.cache);
     }
     photos
 }
 
 fn state_json(inner: &Inner, photos: &[Photo]) -> Value {
     let pending = inner.files.iter().filter(|f| f.analysis.is_none()).count();
+    let library = if inner.library.is_null() { default_library() } else { inner.library.clone() };
     json!({
         "folder": inner.folder.to_string_lossy(),
         "files": inner.files,
         "photos": photos,
-        "library": inner.library,
-        "pending": pending
+        "library": library,
+        "pending": pending,
+        "needs_folder": !main_ok(inner),
+        "roots": roots_json(inner),
+        "ui": inner.ui
     })
 }
 
@@ -448,8 +670,9 @@ fn spawn_analysis(app: tauri::AppHandle, st: AppState) {
                     bpm: None,
                     peaks: vec![0; BUCKETS],
                     rms: vec![0; BUCKETS],
+                    lead: 0.0,
                 });
-                let n = {
+                {
                     let mut inner = st.inner.lock().unwrap();
                     if inner.folder != folder {
                         return;
@@ -462,9 +685,7 @@ fn spawn_analysis(app: tauri::AppHandle, st: AppState) {
                     if n % 10 == 0 {
                         save_cache_file(&inner.folder, &inner.cache);
                     }
-                    n
-                };
-                let _ = n;
+                }
                 let _ = app.emit("analysis", json!({ "id": f.id, "analysis": a }));
             });
         });
@@ -478,16 +699,31 @@ fn spawn_analysis(app: tauri::AppHandle, st: AppState) {
 
 // ---------- commands ----------
 
-fn load_and_scan(app: &tauri::AppHandle, st: &AppState, folder: PathBuf) -> Value {
+/// Carga la config la primera vez, (re)carga los datos de la carpeta principal si cambio, y escanea.
+fn refresh(app: &tauri::AppHandle, st: &AppState) -> Value {
     let v = {
         let mut inner = st.inner.lock().unwrap();
-        if inner.folder != folder || inner.library.is_null() {
-            inner.folder = folder.clone();
-            inner.library = load_library(&folder);
-            inner.cache = load_cache(&folder);
+        if !inner.loaded {
+            let (roots, ui) = load_config(app);
+            inner.roots = roots;
+            inner.ui = ui;
+            inner.loaded = true;
         }
-        let photos = scan(&mut inner);
-        state_json(&inner, &photos)
+        sync_main(&mut inner);
+        if !main_ok(&inner) {
+            inner.files.clear();
+            empty_state(&inner)
+        } else {
+            if inner.data_root != inner.folder || inner.library.is_null() {
+                let f = inner.folder.clone();
+                inner.library = load_library(&f);
+                inner.cache = load_cache(&f);
+                inner.app_covers = load_app_covers(&f);
+                inner.data_root = f;
+            }
+            let photos = scan(&mut inner);
+            state_json(&inner, &photos)
+        }
     };
     spawn_analysis(app.clone(), st.clone());
     v
@@ -496,42 +732,198 @@ fn load_and_scan(app: &tauri::AppHandle, st: &AppState, folder: PathBuf) -> Valu
 #[tauri::command]
 async fn get_state(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Value, String> {
     let st = st.inner().clone();
-    let folder = {
-        let inner = st.inner.lock().unwrap();
-        if inner.library.is_null() { None } else { Some(inner.folder.clone()) }
-    };
-    let folder = match folder.or_else(|| load_folder(&app)) {
-        Some(f) => f,
-        None => return Ok(empty_state()),
-    };
-    Ok(load_and_scan(&app, &st, folder))
+    Ok(refresh(&app, &st))
 }
 
 #[tauri::command]
 async fn rescan(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Value, String> {
     let st = st.inner().clone();
-    let folder = st.inner.lock().unwrap().folder.clone();
-    if folder.as_os_str().is_empty() {
-        return Ok(empty_state());
+    Ok(refresh(&app, &st))
+}
+
+fn pick_dir(app: &tauri::AppHandle, start: Option<PathBuf>) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dlg = app.dialog().file();
+    match start {
+        Some(d) if d.is_dir() => dlg = dlg.set_directory(&d),
+        _ => {
+            if let Ok(a) = app.path().audio_dir() {
+                dlg = dlg.set_directory(a);
+            }
+        }
     }
-    Ok(load_and_scan(&app, &st, folder))
+    dlg.blocking_pick_folder().and_then(|p| p.into_path().ok())
 }
 
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Option<Value>, String> {
-    use tauri_plugin_dialog::DialogExt;
     let st = st.inner().clone();
+    ensure_config(&app, &st);
     let current = st.inner.lock().unwrap().folder.clone();
-    let mut dlg = app.dialog().file();
-    if current.is_dir() {
-        dlg = dlg.set_directory(&current);
-    } else if let Ok(a) = app.path().audio_dir() {
-        dlg = dlg.set_directory(a);
+    let Some(p) = pick_dir(&app, Some(current)) else { return Ok(None) };
+    {
+        let mut inner = st.inner.lock().unwrap();
+        let ps = p.to_string_lossy().to_string();
+        // si la carpeta elegida ya era una extra, deja de ser extra
+        inner.roots.retain(|r| r.key.is_empty() || r.path != ps);
+        if inner.roots.is_empty() {
+            inner.roots.push(Root { path: ps, key: String::new(), excluded: vec![] });
+        } else if inner.roots[0].path != ps {
+            inner.roots[0] = Root { path: ps, key: String::new(), excluded: vec![] };
+        }
+        save_config(&app, &inner);
     }
-    let picked = dlg.blocking_pick_folder();
-    let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    save_folder(&app, &p);
-    Ok(Some(load_and_scan(&app, &st, p)))
+    Ok(Some(refresh(&app, &st)))
+}
+
+fn ensure_config(app: &tauri::AppHandle, st: &AppState) {
+    let mut inner = st.inner.lock().unwrap();
+    if !inner.loaded {
+        let (roots, ui) = load_config(app);
+        inner.roots = roots;
+        inner.ui = ui;
+        inner.loaded = true;
+        sync_main(&mut inner);
+    }
+}
+
+#[tauri::command]
+async fn add_root(app: tauri::AppHandle, st: TState<'_, AppState>) -> Result<Option<Value>, String> {
+    let st = st.inner().clone();
+    ensure_config(&app, &st);
+    {
+        let inner = st.inner.lock().unwrap();
+        if inner.roots.is_empty() {
+            return Err("Primero elegí la carpeta principal de tu música".into());
+        }
+    }
+    let Some(p) = pick_dir(&app, None) else { return Ok(None) };
+    {
+        let mut inner = st.inner.lock().unwrap();
+        let ps = p.to_string_lossy().to_string();
+        if !inner.roots.iter().any(|r| r.path.eq_ignore_ascii_case(&ps)) {
+            let key = new_key(&inner.roots, &ps);
+            inner.roots.push(Root { path: ps, key, excluded: vec![] });
+            save_config(&app, &inner);
+        }
+    }
+    Ok(Some(refresh(&app, &st)))
+}
+
+#[tauri::command]
+async fn remove_root(app: tauri::AppHandle, st: TState<'_, AppState>, key: String) -> Result<Value, String> {
+    let st = st.inner().clone();
+    ensure_config(&app, &st);
+    if key.is_empty() {
+        return Err("La carpeta principal no se quita: cambiala con \"Cambiar carpeta principal\".".into());
+    }
+    {
+        let mut inner = st.inner.lock().unwrap();
+        inner.roots.retain(|r| r.key != key);
+        save_config(&app, &inner);
+    }
+    Ok(refresh(&app, &st))
+}
+
+#[tauri::command]
+async fn set_excluded(app: tauri::AppHandle, st: TState<'_, AppState>, key: String, excluded: Vec<String>) -> Result<Value, String> {
+    let st = st.inner().clone();
+    ensure_config(&app, &st);
+    {
+        let mut inner = st.inner.lock().unwrap();
+        let mut list: Vec<String> = Vec::new();
+        for e in excluded.iter().map(|e| norm_rel(e)) {
+            if !e.is_empty() && !list.contains(&e) {
+                list.push(e);
+            }
+        }
+        let Some(r) = inner.roots.iter_mut().find(|r| r.key == key) else { return Err("No encuentro esa carpeta".into()) };
+        r.excluded = list;
+        save_config(&app, &inner);
+    }
+    Ok(refresh(&app, &st))
+}
+
+/// Pre-orden: cada subcarpeta (con audios en ella o debajo) con su profundidad y los audios que tiene directamente.
+fn subs_rec(dir: &Path, rel: &str, depth: u32, out: &mut Vec<Value>) -> u64 {
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+    let mut direct = 0u64;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        if meta.is_dir() {
+            dirs.push((name, e.path()));
+        } else if let Some(x) = e.path().extension() {
+            if AUDIO_EXT.contains(&x.to_string_lossy().to_lowercase().as_str()) {
+                direct += 1;
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    let mut total = direct;
+    for (name, p) in dirs {
+        if depth >= 6 {
+            break;
+        }
+        let child = if rel.is_empty() { name } else { format!("{}/{}", rel, name) };
+        let idx = out.len();
+        out.push(Value::Null);
+        let sub = subs_rec(&p, &child, depth + 1, out);
+        // audios directos de la hija = total de la hija menos los de sus propias hijas; se recalculan al leer
+        let own = count_audio(&p);
+        if sub == 0 {
+            out.truncate(idx);
+        } else {
+            out[idx] = json!({ "rel": child, "depth": depth, "audio": own });
+        }
+        total += sub;
+    }
+    total
+}
+
+fn count_audio(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .filter(|e| {
+                    e.path().extension().map(|x| AUDIO_EXT.contains(&x.to_string_lossy().to_lowercase().as_str())).unwrap_or(false)
+                        && e.metadata().map(|m| m.is_file()).unwrap_or(false)
+                })
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+async fn list_subfolders(app: tauri::AppHandle, st: TState<'_, AppState>, key: String) -> Result<Vec<Value>, String> {
+    let st = st.inner().clone();
+    ensure_config(&app, &st);
+    let path = {
+        let inner = st.inner.lock().unwrap();
+        inner.roots.iter().find(|r| r.key == key).map(|r| PathBuf::from(&r.path))
+    };
+    let Some(path) = path else { return Err("No encuentro esa carpeta".into()) };
+    if !path.is_dir() {
+        return Err("No encuentro la carpeta (¿el disco está conectado?)".into());
+    }
+    let mut out = Vec::new();
+    subs_rec(&path, "", 0, &mut out);
+    Ok(out)
+}
+
+#[tauri::command]
+async fn save_ui_settings(app: tauri::AppHandle, st: TState<'_, AppState>, ui: Value) -> Result<(), String> {
+    let st = st.inner().clone();
+    ensure_config(&app, &st);
+    let mut inner = st.inner.lock().unwrap();
+    inner.ui = ui;
+    save_config(&app, &inner);
+    Ok(())
 }
 
 #[tauri::command]
@@ -540,6 +932,178 @@ async fn save_library(library: Value, st: TState<'_, AppState>) -> Result<(), St
     inner.library = library;
     save_library_file(&inner.folder.clone(), &inner.library);
     Ok(())
+}
+
+// ---------- portadas y renombrar ----------
+
+fn is_bad_name_char(c: char) -> bool {
+    matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 32
+}
+
+#[tauri::command]
+async fn rename_track(app: tauri::AppHandle, st: TState<'_, AppState>, id: String, name: String) -> Result<Value, String> {
+    let st = st.inner().clone();
+    let name = name.trim().to_string();
+    let new_id = {
+        let mut inner = st.inner.lock().unwrap();
+        let f = inner.files.iter().find(|f| f.id == id).cloned().ok_or("No encuentro el tema")?;
+        if name.is_empty() {
+            return Err("El nombre no puede estar vacío".into());
+        }
+        if name.chars().any(is_bad_name_char) {
+            return Err("El nombre tiene caracteres que Windows no permite: \\ / : * ? \" < > |".into());
+        }
+        if name.ends_with('.') || name.chars().count() > 180 {
+            return Err("El nombre no es válido (no puede terminar en punto ni ser tan largo)".into());
+        }
+        let old_path = PathBuf::from(&f.path);
+        let ext = old_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let file_name = if ext.is_empty() { name.clone() } else { format!("{}.{}", name, ext) };
+        let new_path = old_path.with_file_name(&file_name);
+        if new_path != old_path {
+            let same_file_other_case = new_path.to_string_lossy().to_lowercase() == old_path.to_string_lossy().to_lowercase();
+            if new_path.exists() && !same_file_other_case {
+                return Err("Ya existe un tema con ese nombre".into());
+            }
+            fs::rename(&old_path, &new_path)
+                .map_err(|e| format!("No pude renombrar el archivo (¿está abierto en otro programa?): {}", e))?;
+        }
+        let new_rel = match f.rel.rfind('/') {
+            Some(i) => format!("{}/{}", &f.rel[..i], file_name),
+            None => file_name.clone(),
+        };
+        let new_id = make_id(&f.root, &new_rel);
+        if new_id != id {
+            if let Some(tracks) = inner.library.get_mut("tracks").and_then(|t| t.as_object_mut()) {
+                if let Some(t) = tracks.remove(&id) {
+                    tracks.insert(new_id.clone(), t);
+                }
+            }
+            if let Some(c) = inner.cache.remove(&id) {
+                inner.cache.insert(new_id.clone(), c);
+            }
+            if let Some(c) = inner.app_covers.remove(&id) {
+                inner.app_covers.insert(new_id.clone(), c);
+            }
+        }
+        let main = inner.folder.clone();
+        save_library_file(&main, &inner.library);
+        save_cache_file(&main, &inner.cache);
+        save_app_covers(&main, &inner.app_covers);
+        new_id
+    };
+    let state = refresh(&app, &st);
+    Ok(json!({ "id": new_id, "state": state }))
+}
+
+#[tauri::command]
+async fn set_cover(
+    st: TState<'_, AppState>,
+    id: String,
+    mode: String,
+    path: Option<String>,
+    data: Option<String>,
+    ext: Option<String>,
+) -> Result<Value, String> {
+    use base64::Engine;
+    let st = st.inner().clone();
+    let bytes: Vec<u8> = if let Some(d) = data {
+        base64::engine::general_purpose::STANDARD.decode(d.trim()).map_err(|_| "La imagen no se pudo leer".to_string())?
+    } else if let Some(p) = path {
+        let meta = fs::metadata(&p).map_err(|_| "No pude abrir la imagen".to_string())?;
+        if meta.len() as usize > MAX_COVER_BYTES {
+            return Err("La imagen es demasiado grande (máximo 15 MB)".into());
+        }
+        fs::read(&p).map_err(|_| "No pude abrir la imagen".to_string())?
+    } else {
+        return Err("No llegó ninguna imagen".into());
+    };
+    if bytes.is_empty() {
+        return Err("La imagen está vacía".into());
+    }
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err("La imagen es demasiado grande (máximo 15 MB)".into());
+    }
+    let _ = ext;
+    let img_ext: &str = match covers::sniff_ext(&bytes) {
+        Some(e) if e == "jpg" || e == "png" || e == "webp" => e,
+        _ => return Err("La imagen no es válida (usá JPG, PNG o WebP)".into()),
+    };
+
+    let mut inner = st.inner.lock().unwrap();
+    let main = inner.folder.clone();
+    if !main_ok(&inner) {
+        return Err("Primero elegí la carpeta de tu música".into());
+    }
+    let idx = inner.files.iter().position(|f| f.id == id).ok_or("No encuentro el tema")?;
+    let f = inner.files[idx].clone();
+    let mut warning: Option<&str> = None;
+    let mut in_file = false;
+
+    if mode == "file" {
+        let supported = ["mp3", "m4a", "flac", "ogg"].contains(&f.ext.as_str());
+        let res = if supported {
+            let p = Path::new(&f.path);
+            covers::write_front_cover(p, &bytes, img_ext).and_then(|_| {
+                if covers::extract_embedded(p).is_some() { Ok(()) } else { Err("no quedó".to_string()) }
+            })
+        } else {
+            Err("formato sin portada interna".to_string())
+        };
+        match res {
+            Ok(()) => in_file = true,
+            Err(_) => warning = Some("No pude guardar la portada dentro del archivo; quedó guardada solo en la app."),
+        }
+    }
+
+    ensure_data_dir(&main);
+    let portadas = data_dir(&main).join("portadas");
+    let _ = fs::create_dir_all(&portadas);
+    if in_file {
+        // el archivo cambio: actualizar size/mtime para que no se re-analice ni se tome como renombre
+        if let Ok(meta) = fs::metadata(&f.path) {
+            let (size, mtime) = (meta.len(), mtime_of(&meta));
+            inner.files[idx].size = size;
+            inner.files[idx].mtime = mtime;
+            if let Some(c) = inner.cache.get_mut(&id) {
+                c.size = size;
+                c.mtime = mtime;
+            }
+            let h = emb_hash(&inner.files[idx]);
+            let emb = portadas.join("emb");
+            let _ = fs::create_dir_all(&emb);
+            let target = emb.join(format!("{}.{}", h, img_ext));
+            let _ = fs::write(&target, &bytes);
+            inner.files[idx].cover = Some(target.to_string_lossy().to_string());
+        }
+        // la portada del archivo manda: se saca la de la app
+        if let Some(old) = inner.app_covers.remove(&id) {
+            let _ = fs::remove_file(portadas.join(old));
+            save_app_covers(&main, &inner.app_covers);
+        }
+        save_cache_file(&main, &inner.cache);
+    } else {
+        let name = format!("app-{:016x}.{}", covers::fnv1a(&[id.as_bytes()]), img_ext);
+        let target = portadas.join(&name);
+        fs::write(&target, &bytes).map_err(|e| format!("No pude guardar la portada: {}", e))?;
+        if let Some(old) = inner.app_covers.insert(id.clone(), name.clone()) {
+            if old != name {
+                let _ = fs::remove_file(portadas.join(old));
+            }
+        }
+        save_app_covers(&main, &inner.app_covers);
+        inner.files[idx].cover = Some(target.to_string_lossy().to_string());
+    }
+
+    let mut out = json!({
+        "file": inner.files[idx],
+        "mode": if in_file { "file" } else { "app" },
+        "library": inner.library
+    });
+    if let Some(w) = warning {
+        out["warning"] = json!(w);
+    }
+    Ok(out)
 }
 
 static DRAG_ICON: &[u8] = include_bytes!("../icons/icon.png");
@@ -649,8 +1213,9 @@ fn save_analysis(st: TState<'_, AppState>, id: String, analysis: Analysis) -> Re
 #[tauri::command]
 async fn import_files(app: tauri::AppHandle, st: TState<'_, AppState>, paths: Vec<String>) -> Result<Value, String> {
     let st = st.inner().clone();
+    ensure_config(&app, &st);
     let folder = st.inner.lock().unwrap().folder.clone();
-    if folder.as_os_str().is_empty() {
+    if !folder.is_dir() {
         return Err("Primero elegí la carpeta de tu música".into());
     }
     let (mut added, mut skipped) = (0, 0);
@@ -679,7 +1244,7 @@ async fn import_files(app: tauri::AppHandle, st: TState<'_, AppState>, paths: Ve
             skipped += 1;
         }
     }
-    let state = load_and_scan(&app, &st, folder);
+    let state = refresh(&app, &st);
     Ok(json!({ "state": state, "added": added, "skipped": skipped }))
 }
 
@@ -706,7 +1271,7 @@ fn reveal(path: String) -> Result<(), String> {
 }
 
 fn main() {
-    let st: AppState = Arc::new(App { inner: Mutex::new(Inner { library: Value::Null, ..Default::default() }), generation: AtomicU64::new(0) });
+    let st: AppState = Arc::new(App { inner: Mutex::new(Inner { library: Value::Null, ui: json!({}), ..Default::default() }), generation: AtomicU64::new(0) });
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
@@ -717,6 +1282,25 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(st)
+        .setup(|app| {
+            // Sin zoom de la pagina con pellizco: la interfaz usa el gesto para hacer zoom en la onda.
+            #[cfg(windows)]
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.with_webview(|wv| unsafe {
+                    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings5;
+                    use windows_core::Interface;
+                    if let Ok(core) = wv.controller().CoreWebView2() {
+                        if let Ok(settings) = core.Settings() {
+                            if let Ok(s5) = settings.cast::<ICoreWebView2Settings5>() {
+                                let _ = s5.SetIsPinchZoomEnabled(false);
+                            }
+                        }
+                    }
+                });
+            }
+            let _ = app;
+            Ok(())
+        })
         .on_window_event(|window, event| {
             // Give the UI a moment to save pending edits before the window closes.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -732,7 +1316,10 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_state, rescan, pick_folder, save_library, start_drag, reveal, drag_fragment, save_fragment_wav, save_analysis, import_files, quit])
+        .invoke_handler(tauri::generate_handler![
+            get_state, rescan, pick_folder, save_library, start_drag, reveal, drag_fragment, save_fragment_wav, save_analysis, import_files, quit,
+            add_root, remove_root, set_excluded, list_subfolders, save_ui_settings, set_cover, rename_track
+        ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la app");
 }
