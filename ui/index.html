@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="es-AR">
+<html lang="es-AR" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Clasificador de música</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,7 +19,7 @@
       <button id="btn-clear" class="btn">Limpiar filtros</button>
       <button id="btn-cats" class="btn">Gestionar categorías</button>
       <div class="two">
-        <button id="btn-folder" class="btn">Cambiar carpeta</button>
+        <button id="btn-settings" class="btn">Configuración</button>
         <button id="btn-rescan" class="btn">Reescanear</button>
       </div>
     </div>
@@ -29,6 +30,7 @@
       <span id="count">0 temas</span>
       <span id="pending" hidden></span>
       <span class="grow"></span>
+      <button id="btn-quick" class="btn" title="Etiquetado rápido (E)">Etiquetado rápido <kbd>E</kbd></button>
       <button id="btn-help" class="btn" title="Ver atajos (?)">Atajos</button>
       <label class="sortl">Orden
         <select id="sort">
@@ -40,6 +42,7 @@
       </label>
       <button id="btn-rand" class="btn rnd" title="Reproducir un tema al azar de la lista (R)">Al azar <kbd>R</kbd></button>
     </div>
+    <div id="qbar" hidden></div>
     <div id="list"><div id="list-inner"></div></div>
   </main>
 
@@ -56,20 +59,22 @@
       <span id="p-drag" class="dh" hidden></span>
       <button id="b-save-range" class="btn gold" hidden>Guardar como momento</button>
       <button id="b-in" class="btn" title="Marcar inicio (I)">Marcar inicio <kbd>I</kbd></button>
-      <button id="b-out" class="btn" title="Marcar fin (O)">Marcar fin <kbd>O</kbd></button>
+      <button id="b-out" class="btn" title="Marcar fin y crear el momento (O)">Marcar fin <kbd>O</kbd></button>
       <button id="b-loop" class="btn" title="Repetir el momento que suena">Loop momento</button>
-      <label class="vol" title="Volumen"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/></svg><input id="vol" type="range" min="0" max="1" step="0.01" value="0.9"></label>
+      <label class="vol" title="Volumen (la marca del medio es el 100%)"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/></svg><span class="vw"><i class="vmark"></i><input id="vol" type="range" min="0" max="1" step="0.005" value="0.4"></span><span id="vol-n">100%</span></label>
     </div>
     <div id="wavebox"><canvas id="wave"></canvas><div id="tip" hidden></div><div id="wave-empty" hidden>Elegí un tema para escucharlo</div></div>
   </footer>
 </div>
 <div id="modal" hidden></div>
+<div id="settings" hidden></div>
+<div id="ask" hidden></div>
 <div id="help" hidden></div>
 <div id="welcome" hidden><div class="wbox">
 <h1>Clasificador de música</h1>
 <p>Elegí la carpeta donde tenés tu música. La app la lee, te deja etiquetarla y buscar rápido lo que necesitás. No toca ni mueve tus archivos: guarda sus datos en una carpeta oculta adentro.</p>
 <button class="btn" id="w-pick">Elegir carpeta de música</button>
-<small>Podés cambiarla cuando quieras con el botón de carpeta de arriba.</small>
+<small>Podés cambiarla cuando quieras desde Configuración.</small>
 </div></div>
 <div id="dropov" hidden><div>Soltá para agregar a tu carpeta de música</div></div>
 <div id="toast" hidden></div>
